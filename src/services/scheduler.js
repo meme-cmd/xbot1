@@ -15,6 +15,7 @@ class SchedulerService {
     this.tweetInterval = config.scheduler.tweetIntervalHours;
     this.metricsCheckHours = config.scheduler.metricsCheckHours;
     this.recentTweets = []; // Store recent tweet IDs for tracking
+    this.repliedToMentions = new Set(); // Track mentions we've already replied to
   }
 
   /**
@@ -112,14 +113,17 @@ class SchedulerService {
       // Generate tweet content
       const tweetContent = await llmService.generateTweet(context);
       
+      // Clean the content to ensure no hashtags
+      const cleanedContent = this.removeHashtags(tweetContent);
+      
       // Post to Twitter
-      const tweet = await twitterService.postTweet(tweetContent);
+      const tweet = await twitterService.postTweet(cleanedContent);
       
       // Store the tweet ID for later metrics tracking
       this.recentTweets.push({
         id: tweet.id,
         createdAt: new Date(),
-        content: tweetContent,
+        content: cleanedContent,
         context
       });
       
@@ -137,6 +141,16 @@ class SchedulerService {
   }
 
   /**
+   * Remove hashtags from content
+   * @param {string} content - The content to clean
+   * @returns {string} - Content without hashtags
+   */
+  removeHashtags(content) {
+    // Replace hashtags with plain text versions
+    return content.replace(/#(\w+)/g, '$1');
+  }
+
+  /**
    * Check for mentions and reply to them
    */
   async checkAndReplyToMentions() {
@@ -144,23 +158,33 @@ class SchedulerService {
       logger.info('Checking for mentions');
       
       // Get recent mentions
-      const mentions = await twitterService.getMentions(10);
+      const mentions = await twitterService.getMentions(20);
       
-      // Filter out mentions we've already replied to (would need storage in a real implementation)
+      // Filter out mentions we've already replied to
       const newMentions = mentions.filter(mention => {
-        // For simplicity, we're just checking if it's recent (last hour)
-        const mentionDate = new Date(mention.created_at);
-        const oneHourAgo = new Date();
-        oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-        
-        return mentionDate > oneHourAgo;
+        return !twitterService.hasRepliedToMention(mention.id) && 
+               !this.repliedToMentions.has(mention.id);
       });
       
       logger.info(`Found ${newMentions.length} new mentions to reply to`);
       
       // Reply to each mention
       for (const mention of newMentions) {
-        await this.replyToMention(mention);
+        try {
+          await this.replyToMention(mention);
+          // Mark as replied so we don't process it again
+          this.repliedToMentions.add(mention.id);
+        } catch (err) {
+          logger.error(`Error replying to mention ${mention.id}:`, err);
+          // Continue with next mention
+        }
+      }
+      
+      // Keep the set of replied-to mentions from growing too large
+      if (this.repliedToMentions.size > 100) {
+        // Convert to array, take the last 50 items, convert back to set
+        const mentionsArray = Array.from(this.repliedToMentions);
+        this.repliedToMentions = new Set(mentionsArray.slice(-50));
       }
       
       return newMentions.length;
@@ -176,19 +200,19 @@ class SchedulerService {
    */
   async replyToMention(mention) {
     try {
-      logger.info(`Replying to mention ${mention.id}`);
-      
-      // Get author name (in a real implementation, would fetch from API)
-      const authorName = mention.author_id || 'user';
+      logger.info(`Replying to mention ${mention.id} from @${mention.author_username}`);
       
       // Gather context for the reply
-      const context = await contentService.gatherReplyContext(mention.text, authorName);
+      const context = await contentService.gatherReplyContext(mention.text, mention);
       
       // Generate reply content
       const replyContent = await llmService.generateReply(context);
       
+      // Clean the content - remove hashtags, ensure only recent tokens are mentioned
+      const cleanedContent = this.cleanReplyContent(replyContent, context.recentTokens);
+      
       // Post the reply
-      const reply = await twitterService.replyToTweet(mention.id, replyContent);
+      const reply = await twitterService.replyToTweet(mention.id, cleanedContent);
       
       logger.info(`Posted reply to mention ${mention.id} with ID: ${reply.id}`);
       return reply;
@@ -196,6 +220,41 @@ class SchedulerService {
       logger.error(`Error replying to mention ${mention.id}:`, error);
       throw error;
     }
+  }
+  
+  /**
+   * Clean reply content to match our requirements
+   * @param {string} content - The original content
+   * @param {Array} recentTokens - List of tokens that are recent (< 120 hours old)
+   * @returns {string} - The cleaned content
+   */
+  cleanReplyContent(content, recentTokens) {
+    // 1. Remove all hashtags
+    let cleaned = this.removeHashtags(content);
+    
+    // 2. Extract all token mentions
+    const tokenRegex = /\$([A-Z]{2,6})\b/g;
+    const tokenMatches = [...cleaned.matchAll(tokenRegex)];
+    const mentionedTokens = tokenMatches.map(match => match[1]);
+    
+    // 3. Get list of allowed token symbols (from the recentTokens array)
+    const allowedTokens = new Set(
+      recentTokens.map(tokenString => {
+        // Extract the symbol from strings like "TokenName (SYMBOL)"
+        const match = tokenString.match(/\(([A-Z]{2,6})\)/);
+        return match ? match[1] : null;
+      }).filter(Boolean) // Remove nulls
+    );
+    
+    // 4. Replace mentions of tokens that aren't in the allowed list
+    mentionedTokens.forEach(token => {
+      if (!allowedTokens.has(token)) {
+        // Replace with non-$ version to avoid mentioning old tokens
+        cleaned = cleaned.replace(new RegExp(`\\$${token}\\b`, 'g'), token);
+      }
+    });
+    
+    return cleaned;
   }
 
   /**

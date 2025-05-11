@@ -1,6 +1,7 @@
 const axios = require('axios');
 const logger = require('../utils/logger');
 const config = require('../config/config');
+const twitterService = require('./twitter');
 
 /**
  * Service for gathering content data for the bot
@@ -63,7 +64,9 @@ class ContentService {
           name: coin.item.name,
           symbol: coin.item.symbol,
           price: coin.item.price_btc,
-          rank: coin.item.market_cap_rank || 9999
+          rank: coin.item.market_cap_rank || 9999,
+          // Add information about how recent this token is
+          isRecent: twitterService.isRecentToken(coin.item.symbol)
         }));
       
       logger.info(`Found ${memecoins.length} trending memecoins`);
@@ -71,6 +74,26 @@ class ContentService {
     } catch (error) {
       logger.error('Error fetching trending memecoins:', error);
       // Return empty array instead of throwing to prevent breaking the flow
+      return [];
+    }
+  }
+
+  /**
+   * Get recent tokens (less than 120 hours old)
+   * @param {number} limit - Number of tokens to return
+   * @returns {Promise<Array>} - Array of recent tokens
+   */
+  async getRecentTokens(limit = 3) {
+    try {
+      logger.info('Filtering for recent tokens');
+      
+      const allTokens = await this.getTrendingMemecoins(20); // Get a bigger sample
+      const recentTokens = allTokens.filter(token => token.isRecent);
+      
+      logger.info(`Found ${recentTokens.length} recent tokens (< 120 hours old)`);
+      return recentTokens.slice(0, limit);
+    } catch (error) {
+      logger.error('Error filtering recent tokens:', error);
       return [];
     }
   }
@@ -105,35 +128,58 @@ class ContentService {
   }
 
   /**
-   * Get trending hashtags related to crypto
-   * @param {number} limit - Number of hashtags to fetch
-   * @returns {Promise<Array>} - Array of trending hashtags
+   * Get trending tweets from accounts the bot follows
+   * @param {number} limit - Number of tweets to fetch
+   * @returns {Promise<Array>} - Array of trending tweets with author info
    */
-  async getTrendingHashtags(limit = 5) {
+  async getTrendingTweets(limit = 5) {
     try {
-      logger.info('Fetching trending crypto hashtags');
+      logger.info('Fetching trending tweets from accounts the bot follows');
       
-      // This is a placeholder. In a real implementation, you would use 
-      // Twitter's API to get trending hashtags in the crypto category
+      const tweets = await twitterService.getPopularTweetsFromFollowing(24, limit * 2);
       
-      // Simulating with common crypto hashtags
-      const hashtags = [
-        'solana',
-        'memecoin',
-        'crypto',
-        'defi',
-        'nft',
-        'web3',
-        'altcoin',
-        'airdrop',
-        'blockchain'
-      ];
+      // Format tweets for easier consumption by LLM
+      const formattedTweets = tweets.slice(0, limit).map(tweet => ({
+        author: `@${tweet.author_username}`,
+        text: tweet.text,
+        engagement: tweet.engagement_score
+      }));
       
-      return hashtags.slice(0, limit);
+      logger.info(`Formatted ${formattedTweets.length} trending tweets`);
+      return formattedTweets;
     } catch (error) {
-      logger.error('Error fetching trending hashtags:', error);
+      logger.error('Error fetching trending tweets:', error);
       return [];
     }
+  }
+
+  /**
+   * Gather context for reply generation
+   * @param {string} originalTweet - The tweet to reply to
+   * @param {Object} mentionData - Data about the mention
+   * @returns {Promise<Object>} - Context object for LLM
+   */
+  async gatherReplyContext(originalTweet, mentionData) {
+    logger.info(`Gathering context for reply to tweet by ${mentionData.author_username}`);
+    
+    // Get recent tokens
+    const recentTokens = await this.getRecentTokens(3);
+    
+    // Get trending tweets
+    const trendingTweets = await this.getTrendingTweets(3);
+    
+    // Extract any token mentions from the original tweet
+    const mentionedTokens = twitterService.extractTokenSymbols(originalTweet)
+      .filter(token => twitterService.isRecentToken(token));
+    
+    return {
+      originalTweet,
+      authorName: mentionData.author_name,
+      authorUsername: mentionData.author_username,
+      recentTokens: recentTokens.map(t => `${t.name} (${t.symbol})`),
+      trendingTweets,
+      mentionedTokens
+    };
   }
 
   /**
@@ -143,35 +189,20 @@ class ContentService {
   async gatherTweetContext() {
     logger.info('Gathering context for tweet generation');
     
-    const [trendingCoins, recentEvents, trendingHashtags] = await Promise.all([
+    const [trendingCoins, recentEvents, trendingTweets] = await Promise.all([
       this.getTrendingMemecoins(),
       this.getRecentEvents(),
-      this.getTrendingHashtags()
+      this.getTrendingTweets(3)
     ]);
     
+    // Filter to only include recent tokens (< 120 hours old)
+    const recentTokens = trendingCoins.filter(coin => coin.isRecent);
+    
     return {
-      trends: trendingHashtags,
       recentEvents: recentEvents,
-      topCoins: trendingCoins.map(coin => `${coin.name} (${coin.symbol})`)
-    };
-  }
-
-  /**
-   * Gather context for reply generation
-   * @param {string} originalTweet - The tweet to reply to
-   * @param {string} authorName - The author of the original tweet
-   * @returns {Promise<Object>} - Context object for LLM
-   */
-  async gatherReplyContext(originalTweet, authorName) {
-    logger.info(`Gathering context for reply to tweet by ${authorName}`);
-    
-    // For replies, we mainly need the original tweet and author,
-    // but we could also analyze the tweet content for better context
-    
-    return {
-      originalTweet,
-      authorName,
-      // Additional context could be added here
+      topCoins: trendingCoins.map(coin => `${coin.name} (${coin.symbol})`),
+      recentTokens: recentTokens.map(coin => `${coin.name} (${coin.symbol})`),
+      trendingTweets
     };
   }
 
