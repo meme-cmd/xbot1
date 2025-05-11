@@ -3,6 +3,7 @@ const path = require('path');
 const logger = require('./utils/logger');
 const config = require('./config/config');
 const botController = require('./controllers/bot');
+const axios = require('axios'); // Add axios for self-ping
 
 // Create Express app
 const app = express();
@@ -21,32 +22,31 @@ app.get('/health', (req, res) => {
 // API endpoints
 app.post('/api/bot/start', async (req, res) => {
   try {
-    const success = await botController.start();
-    res.status(success ? 200 : 500).json({ success });
-  } catch (error) {
-    logger.error('Error starting bot:', error);
-    res.status(500).json({ success: false, error: error.message });
+    const success = await botController.startBot();
+    res.status(200).json({ success });
+  } catch (err) {
+    logger.error(`Error starting bot: ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/bot/stop', (req, res) => {
+app.post('/api/bot/stop', async (req, res) => {
   try {
-    const success = botController.stop();
-    res.status(success ? 200 : 500).json({ success });
-  } catch (error) {
-    logger.error('Error stopping bot:', error);
-    res.status(500).json({ success: false, error: error.message });
+    const success = await botController.stopBot();
+    res.status(200).json({ success });
+  } catch (err) {
+    logger.error(`Error stopping bot: ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/tweet', async (req, res) => {
+app.post('/api/bot/tweet', async (req, res) => {
   try {
-    const { content } = req.body;
-    const tweet = await botController.tweet(content);
+    const tweet = await botController.generateAndPostTweet();
     res.status(200).json({ success: true, tweet });
-  } catch (error) {
-    logger.error('Error posting tweet:', error);
-    res.status(500).json({ success: false, error: error.message });
+  } catch (err) {
+    logger.error(`Error posting tweet: ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -81,34 +81,55 @@ app.get('/', (req, res) => {
   });
 });
 
-// Start the Express server
-const server = app.listen(port, '0.0.0.0', () => {
-  logger.info(`X Memecoin Bot server started on port ${port}`);
+// Start the server
+const server = app.listen(port, () => {
+  logger.info(`Server running on port ${port}`);
   
-  // Auto-start the bot based on environment
-  if (config.app.environment === 'production') {
-    logger.info('Production environment detected, auto-starting bot');
-    setTimeout(() => {
-      botController.start().then(success => {
-        if (!success) {
-          logger.error('Failed to auto-start bot');
-        } else {
-          logger.info('Bot started successfully in production mode');
-        }
-      });
-    }, 5000); // 5 second delay to ensure everything is initialized
-  } else {
-    logger.info('Development environment detected, bot needs to be started manually');
-  }
+  // Start the bot
+  botController.startBot()
+    .then(() => {
+      logger.info('Bot started successfully');
+    })
+    .catch((err) => {
+      logger.error(`Failed to start bot: ${err.message}`);
+    });
 });
 
-// Handle shutdown gracefully
+// Keep-alive mechanism to prevent Render from putting the service to sleep
+// Render free tier services sleep after 15 minutes of inactivity
+if (process.env.NODE_ENV === 'production') {
+  const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes in milliseconds
+  
+  const pingServer = async () => {
+    try {
+      const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;
+      logger.info(`Pinging health endpoint at ${baseUrl}/health`);
+      const response = await axios.get(`${baseUrl}/health`);
+      logger.info(`Ping successful, status: ${response.status}`);
+    } catch (error) {
+      logger.error(`Ping failed: ${error.message}`);
+    }
+  };
+
+  // Schedule the ping every 14 minutes
+  setInterval(pingServer, PING_INTERVAL);
+  logger.info(`Keep-alive mechanism enabled, pinging every ${PING_INTERVAL / 60 / 1000} minutes`);
+}
+
+// Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully');
-  botController.stop();
   server.close(() => {
     logger.info('Server closed');
-    process.exit(0);
+    botController.stopBot()
+      .then(() => {
+        logger.info('Bot stopped successfully');
+        process.exit(0);
+      })
+      .catch((err) => {
+        logger.error(`Error stopping bot: ${err.message}`);
+        process.exit(1);
+      });
   });
 });
 

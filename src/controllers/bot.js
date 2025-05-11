@@ -13,7 +13,7 @@ class BotController {
   /**
    * Start the bot
    */
-  async start() {
+  async startBot() {
     try {
       logger.info('Starting X Memecoin Bot');
       
@@ -37,7 +37,7 @@ class BotController {
   /**
    * Stop the bot
    */
-  stop() {
+  async stopBot() {
     try {
       logger.info('Stopping X Memecoin Bot');
       
@@ -52,6 +52,41 @@ class BotController {
     } catch (error) {
       logger.error('Error stopping bot:', error);
       return false;
+    }
+  }
+
+  /**
+   * Generate and post a tweet
+   * @returns {Promise<Object>} - Posted tweet data
+   */
+  async generateAndPostTweet() {
+    try {
+      logger.info('Generating and posting tweet');
+      
+      // Generate content using LLM
+      const context = await contentService.gatherTweetContext();
+      const tweetContent = await llmService.generateTweet(context);
+      
+      // Post to Twitter
+      const tweet = await twitterService.postTweet(tweetContent);
+      
+      // Save to database
+      await engagementModel.saveTweet(
+        { 
+          id: tweet.id, 
+          text: tweetContent, 
+          created_at: new Date().toISOString(),
+          type: 'generated'
+        }, 
+        'tweet', 
+        context
+      );
+      
+      logger.info(`Posted generated tweet with ID: ${tweet.id}`);
+      return tweet;
+    } catch (error) {
+      logger.error('Error posting generated tweet:', error);
+      throw error;
     }
   }
 

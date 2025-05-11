@@ -27,4 +27,9 @@ services:
       - key: COINGECKO_API_KEY
         sync: false
       - key: HELIUS_RPC_URL
-        sync: false 
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: x-memecoin-bot
+          envVarKey: RENDER_EXTERNAL_URL 
