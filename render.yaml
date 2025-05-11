@@ -2,6 +2,7 @@ services:
   - type: web
     name: x-memecoin-bot
     env: node
+    nodeVersion: 18.x
     plan: free
     buildCommand: npm install
     startCommand: node src/index.js
