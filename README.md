@@ -9,6 +9,7 @@ An autonomous memecoin-themed Twitter bot powered by Together AI LLM.
 - **Engagement Tracking**: Monitor performance metrics and optimize content strategy
 - **Autonomous Operation**: Scheduled posting and auto-replies
 - **Adaptive Learning**: Continuously improves based on engagement metrics
+- **24/7 Hosting**: Deployable to Render for continuous operation
 
 ## Tech Stack
 
